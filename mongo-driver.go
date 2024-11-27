@@ -21,6 +21,7 @@ type MongoDriver struct {
 }
 
 type MongoDriverOptions struct {
+	Endpoints  []string
 	Database   string
 	Host       string
 	Port       int
@@ -50,7 +51,14 @@ func NewMongoDriver(opts MongoDriverOptions) (*MongoDriver, error) {
 		authSource = fmt.Sprintf("?authSource=%s", opts.AuthSource)
 	}
 
-	client, err := connect(fmt.Sprintf("mongodb://%s:%s@%s:%d/%s%s", opts.Username, opts.Password, opts.Host, opts.Port, opts.Database, authSource))
+	endpointPart := ""
+	if opts.Endpoints != nil && len(opts.Endpoints) > 0 {
+		endpointPart = fmt.Sprintf("%s", strings.Join(opts.Endpoints, ","))
+	} else {
+		endpointPart = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
+	}
+
+	client, err := connect(fmt.Sprintf("mongodb://%s:%s@%s/%s%s", opts.Username, opts.Password, endpointPart, opts.Database, authSource))
 	if err != nil {
 		return nil, err
 	}
