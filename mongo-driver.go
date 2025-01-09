@@ -3,6 +3,7 @@ package mongo_driver
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -88,6 +89,20 @@ func (d *MongoDriver) GetGridfsBucket(name string) (bucket *gridfs.Bucket, err e
 		d.fsBuckets[name] = bucket
 	}
 	return
+}
+
+func (d *MongoDriver) FileExists(bucketName, fileID string) (bool, error) {
+	filesCollection := d.GetCollection(bucketName + ".files")
+
+	_, err := filesCollection.FindOne(context.Background(), bson.M{"_id": fileID}).DecodeBytes()
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return false, nil
+		} else {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func (d *MongoDriver) UploadFile(gridfsBucketName, fileID, fileName string, fileContent []byte) error {
