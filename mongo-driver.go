@@ -59,7 +59,7 @@ func NewMongoDriver(opts MongoDriverOptions) (*MongoDriver, error) {
 		endpointPart = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
 	}
 
-	fmt.Println("[INFO]", "Connecting to MongoDB", fmt.Sprintf("mongodb://%s:******@%s/%s%s", opts.Username, endpointPart, opts.Database, authSource))
+	//fmt.Println("[INFO]", "Connecting to MongoDB", fmt.Sprintf("mongodb://%s:******@%s/%s%s", opts.Username, endpointPart, opts.Database, authSource))
 	client, err := connect(fmt.Sprintf("mongodb://%s:%s@%s/%s%s", opts.Username, opts.Password, endpointPart, opts.Database, authSource))
 	if err != nil {
 		return nil, err
