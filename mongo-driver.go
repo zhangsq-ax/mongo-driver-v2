@@ -29,6 +29,22 @@ type MongoDriverOptions struct {
 	Username   string
 	Password   string
 	AuthSource string
+
+	MaxPoolSize     uint64        // default 100
+	MinPoolSize     uint64        // default 0
+	MaxConnIdleTime time.Duration // default 0
+	ConnectTimeout  time.Duration // default 30s
+}
+
+func (opts MongoDriverOptions) standardize() MongoDriverOptions {
+	if opts.MaxPoolSize == 0 {
+		opts.MaxPoolSize = 100
+	}
+	if opts.ConnectTimeout == 0 {
+		opts.ConnectTimeout = 30 * time.Second
+	}
+
+	return opts
 }
 
 type IndexOption struct {
@@ -47,20 +63,9 @@ type ListOption struct {
 }
 
 func NewMongoDriver(opts MongoDriverOptions) (*MongoDriver, error) {
-	authSource := ""
-	if opts.AuthSource != "" {
-		authSource = fmt.Sprintf("?authSource=%s", opts.AuthSource)
-	}
-
-	endpointPart := ""
-	if opts.Endpoints != nil && len(opts.Endpoints) > 0 {
-		endpointPart = fmt.Sprintf("%s", strings.Join(opts.Endpoints, ","))
-	} else {
-		endpointPart = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
-	}
 
 	//fmt.Println("[INFO]", "Connecting to MongoDB", fmt.Sprintf("mongodb://%s:******@%s/%s%s", opts.Username, endpointPart, opts.Database, authSource))
-	client, err := connect(fmt.Sprintf("mongodb://%s:%s@%s/%s%s", opts.Username, opts.Password, endpointPart, opts.Database, authSource))
+	client, err := connect(opts)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +172,27 @@ func (d *MongoDriver) DeleteFile(gridfsBucketName, fileID string) error {
 	return nil
 }
 
-func connect(mongoUri string) (*mongo.Client, error) {
-	opts := options.Client().ApplyURI(mongoUri)
+func connect(opts MongoDriverOptions) (*mongo.Client, error) {
+	opts = opts.standardize()
+	authSource := ""
+	if opts.AuthSource != "" {
+		authSource = fmt.Sprintf("?authSource=%s", opts.AuthSource)
+	}
 
-	client, err := mongo.Connect(context.Background(), opts)
+	endpointPart := ""
+	if opts.Endpoints != nil && len(opts.Endpoints) > 0 {
+		endpointPart = fmt.Sprintf("%s", strings.Join(opts.Endpoints, ","))
+	} else {
+		endpointPart = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
+	}
+	mongoUri := fmt.Sprintf("mongodb://%s:%s@%s/%s%s", opts.Username, opts.Password, endpointPart, opts.Database, authSource)
+	connOpts := options.Client().ApplyURI(mongoUri)
+	connOpts.SetMaxPoolSize(opts.MinPoolSize)
+	connOpts.SetMinPoolSize(opts.MinPoolSize)
+	connOpts.SetMaxConnIdleTime(opts.MaxConnIdleTime)
+	connOpts.SetConnectTimeout(opts.ConnectTimeout)
+
+	client, err := mongo.Connect(context.Background(), connOpts)
 	if err != nil {
 		return nil, err
 	}
