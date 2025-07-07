@@ -12,10 +12,17 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
+var (
+	driverInstances = sync.Map{}
+	mutex           = sync.Mutex{}
+)
+
 type MongoDriver struct {
+	uri       string
 	client    *mongo.Client
 	db        *mongo.Database
 	fsBuckets map[string]*gridfs.Bucket
@@ -47,6 +54,21 @@ func (opts MongoDriverOptions) standardize() MongoDriverOptions {
 	return opts
 }
 
+func (opts MongoDriverOptions) URI() string {
+	authSource := ""
+	if opts.AuthSource != "" {
+		authSource = fmt.Sprintf("?authSource=%s", opts.AuthSource)
+	}
+
+	endpointPart := ""
+	if opts.Endpoints != nil && len(opts.Endpoints) > 0 {
+		endpointPart = fmt.Sprintf("%s", strings.Join(opts.Endpoints, ","))
+	} else {
+		endpointPart = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
+	}
+	return fmt.Sprintf("mongodb://%s:%s@%s/%s%s", opts.Username, opts.Password, endpointPart, opts.Database, authSource)
+}
+
 type IndexOption struct {
 	Name string
 	//Keys   map[string]interface{}
@@ -62,25 +84,55 @@ type ListOption struct {
 	Skip       int64
 }
 
+// NewMongoDriver 创建一个新的MongoDriver实例，根据连接信息判断已经创建过的实例是否存在，如果存在则返回已存在的实例，否则创建新的实例。
 func NewMongoDriver(opts MongoDriverOptions) (*MongoDriver, error) {
+	mutex.Lock()
+	defer mutex.Unlock()
 
-	//fmt.Println("[INFO]", "Connecting to MongoDB", fmt.Sprintf("mongodb://%s:******@%s/%s%s", opts.Username, endpointPart, opts.Database, authSource))
-	client, err := connect(opts)
-	if err != nil {
-		return nil, err
+	opts = opts.standardize()
+	uri := opts.URI()
+
+	var (
+		driver *MongoDriver
+		client *mongo.Client
+		err    error
+	)
+	if d, ok := driverInstances.Load(uri); ok {
+		driver = d.(*MongoDriver)
+	} else {
+		client, err = connect(opts)
+		if err != nil {
+			return nil, err
+		}
+		driver = &MongoDriver{
+			uri:       uri,
+			client:    client,
+			db:        client.Database(opts.Database),
+			fsBuckets: make(map[string]*gridfs.Bucket),
+		}
+		driverInstances.Store(uri, driver)
 	}
-
-	return &MongoDriver{
-		client:    client,
-		db:        client.Database(opts.Database),
-		fsBuckets: make(map[string]*gridfs.Bucket),
-	}, nil
+	return driver, nil
 }
 
+// CloseAllMongoDrivers 关闭所有MongoDriver实例，用于程序退出时关闭所有连接。
+// 注意：此方法会关闭所有MongoDriver实例，包括已经创建的实例和新创建的实例。
+func CloseAllMongoDrivers() {
+	driverInstances.Range(func(key, value interface{}) bool {
+		driver := value.(*MongoDriver)
+		_ = driver.Close()
+		return true
+	})
+}
+
+// GetCollection 获取指定名称的集合。
 func (d *MongoDriver) GetCollection(name string) *mongo.Collection {
 	return d.db.Collection(name)
 }
 
+// GetGridfsBucket 获取指定名称的GridFS桶。
+// 如果名称为空或为默认名称，则返回默认桶。
+// 如果名称不为空，则返回指定名称的桶。
 func (d *MongoDriver) GetGridfsBucket(name string) (bucket *gridfs.Bucket, err error) {
 	var ok bool
 	bucket, ok = d.fsBuckets[name]
@@ -96,6 +148,8 @@ func (d *MongoDriver) GetGridfsBucket(name string) (bucket *gridfs.Bucket, err e
 	return
 }
 
+// FileExists 判断指定名称的文件是否存在。
+// 如果文件存在，则返回true，否则返回false。
 func (d *MongoDriver) FileExists(bucketName, fileID string) (bool, error) {
 	filesCollection := d.GetCollection(bucketName + ".files")
 
@@ -110,6 +164,7 @@ func (d *MongoDriver) FileExists(bucketName, fileID string) (bool, error) {
 	return true, nil
 }
 
+// UploadFile 上传文件到指定名称的GridFS桶。
 func (d *MongoDriver) UploadFile(gridfsBucketName, fileID, fileName string, fileContent []byte) error {
 	bucket, err := d.GetGridfsBucket(gridfsBucketName)
 	if err != nil {
@@ -122,6 +177,7 @@ func (d *MongoDriver) UploadFile(gridfsBucketName, fileID, fileName string, file
 	return nil
 }
 
+// DownloadFile 下载指定名称的文件。
 func (d *MongoDriver) DownloadFile(gridfsBucketName, fileID string) (fileInfo *gridfs.File, fileContent []byte, err error) {
 	var stream *gridfs.DownloadStream
 	stream, err = d.GetFileDownloadStream(gridfsBucketName, fileID)
@@ -150,6 +206,7 @@ func (d *MongoDriver) DownloadFile(gridfsBucketName, fileID string) (fileInfo *g
 	return
 }
 
+// GetFileDownloadStream 获取指定名称的文件下载流。
 func (d *MongoDriver) GetFileDownloadStream(gridfsBucketName, fileID string) (stream *gridfs.DownloadStream, err error) {
 	var bucket *gridfs.Bucket
 	bucket, err = d.GetGridfsBucket(gridfsBucketName)
@@ -160,33 +217,27 @@ func (d *MongoDriver) GetFileDownloadStream(gridfsBucketName, fileID string) (st
 	return
 }
 
+// DeleteFile 删除指定名称的文件。
 func (d *MongoDriver) DeleteFile(gridfsBucketName, fileID string) error {
 	bucket, err := d.GetGridfsBucket(gridfsBucketName)
 	if err != nil {
 		return err
 	}
 	err = bucket.Delete(fileID)
-	if err != nil && err != gridfs.ErrFileNotFound {
+	if err != nil && !errors.Is(err, gridfs.ErrFileNotFound) {
 		return err
 	}
 	return nil
 }
 
-func connect(opts MongoDriverOptions) (*mongo.Client, error) {
-	opts = opts.standardize()
-	authSource := ""
-	if opts.AuthSource != "" {
-		authSource = fmt.Sprintf("?authSource=%s", opts.AuthSource)
-	}
+// Close 关闭MongoDriver实例。
+func (d *MongoDriver) Close() error {
+	driverInstances.Delete(d.uri)
+	return d.client.Disconnect(context.Background())
+}
 
-	endpointPart := ""
-	if opts.Endpoints != nil && len(opts.Endpoints) > 0 {
-		endpointPart = fmt.Sprintf("%s", strings.Join(opts.Endpoints, ","))
-	} else {
-		endpointPart = fmt.Sprintf("%s:%d", opts.Host, opts.Port)
-	}
-	mongoUri := fmt.Sprintf("mongodb://%s:%s@%s/%s%s", opts.Username, opts.Password, endpointPart, opts.Database, authSource)
-	connOpts := options.Client().ApplyURI(mongoUri)
+func connect(opts MongoDriverOptions) (*mongo.Client, error) {
+	connOpts := options.Client().ApplyURI(opts.URI())
 	connOpts.SetMaxPoolSize(opts.MinPoolSize)
 	connOpts.SetMinPoolSize(opts.MinPoolSize)
 	connOpts.SetMaxConnIdleTime(opts.MaxConnIdleTime)
@@ -245,6 +296,8 @@ func generateIndexName(opts *IndexOption) {
 	}
 }
 
+// CreateIndex 创建索引，如果索引已经存在，则不创建。
+// 如果索引不存在，则创建索引。
 func CreateIndex(c *mongo.Collection, opts ...*IndexOption) error {
 	for _, opt := range opts {
 		generateIndexName(opt)
@@ -272,6 +325,7 @@ func CreateIndex(c *mongo.Collection, opts ...*IndexOption) error {
 	return nil
 }
 
+// RemoveIndex 删除指定名称的索引。
 func RemoveIndex(c *mongo.Collection, indexNames ...string) error {
 	iv := c.Indexes()
 	for _, indexName := range indexNames {
@@ -283,6 +337,8 @@ func RemoveIndex(c *mongo.Collection, indexNames ...string) error {
 	return nil
 }
 
+// RemoveIndexByOption 删除指定选项的索引。
+// 注意：此方法会根据IndexOption的Keys生成索引名称，然后删除指定名称的索引。
 func RemoveIndexByOption(c *mongo.Collection, opts ...*IndexOption) error {
 	var indexNames []string
 	for _, opt := range opts {
@@ -293,6 +349,7 @@ func RemoveIndexByOption(c *mongo.Collection, opts ...*IndexOption) error {
 	return RemoveIndex(c, indexNames...)
 }
 
+// CursorList 获取指定选项的游标。用于分页查询。 返回游标可以更灵活地处理查询结果。
 func CursorList(c *mongo.Collection, opt *ListOption) (cursor *mongo.Cursor, err error) {
 	opts := options.Find()
 	if opt.Limit > 0 {
@@ -313,6 +370,7 @@ func CursorList(c *mongo.Collection, opt *ListOption) (cursor *mongo.Cursor, err
 	return c.Find(context.Background(), opt.Filter, opts)
 }
 
+// List 获取指定选项的查询结果。用于分页查询。 直接返回查询结果，不需要手动处理游标。
 func List(c *mongo.Collection, opt *ListOption, results interface{}) error {
 	cursor, err := CursorList(c, opt)
 	if err != nil {
